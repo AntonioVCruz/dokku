@@ -1,0 +1,14 @@
+customSteps: |
+  // Controller changes E2E_MARKER through config:set and waits for deployment.
+  // Both expected values come from configuration, never the response under test.
+  check that page contains "Backend not checked"
+  check that page doesn't contain stored value from "expectedBackendMarker"
+  check that page doesn't contain stored value from "previousBackendMarker"
+  click button "Check backend"
+  check that page contains stored value from "expectedBackendMarker"
+  check that page doesn't contain stored value from "previousBackendMarker"
+  check that page doesn't contain "Backend check failed"
+  check that page doesn't contain "Backend not checked"
+labels:
+  - dokku-config-rollout
+  - proxy-routing

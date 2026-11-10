@@ -1,0 +1,12 @@
+customSteps: |
+  // Prove the backend result is absent before the browser executes the request.
+  check that page contains "Backend not checked"
+  check that page doesn't contain stored value from "expectedBackendMarker"
+  click button "Check backend"
+  // This marker comes from installer configuration, independently of the HTTP result.
+  check that page contains stored value from "expectedBackendMarker"
+  check that page doesn't contain "Backend check failed"
+  check that page doesn't contain "Backend not checked"
+labels:
+  - dokku-browser-smoke
+  - proxy-routing
