@@ -100,6 +100,8 @@ jobs:
         with:
           node-version-file: tests/E2E/.node-version
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4
+        with:
+          driver-opts: network=host
       - uses: crazy-max/ghaction-github-runtime@3cb05d89e1f492524af3d41a1c98c83bc3025124  # v3
       - name: Select unique artifact directory
         run: printf 'E2E_ARTIFACTS=%s/dokku-e2e-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"

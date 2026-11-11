@@ -19,9 +19,9 @@ package_cache=()
 runtime_cache=()
 cache=${DOKKU_E2E_BUILD_CACHE:-none}
 if [[ "$cache" == gha ]]; then
-  build=(docker buildx build --load)
-  package_cache=(--cache-from type=gha,scope=dokku-routing-package --cache-to type=gha,scope=dokku-routing-package,mode=max)
-  runtime_cache=(--cache-from type=gha,scope=dokku-routing-runtime --cache-to type=gha,scope=dokku-routing-runtime,mode=max)
+  build=(docker buildx build --load --network=host --allow network.host)
+  package_cache=(--cache-from 'type=gha,scope=dokku-routing-package' --cache-to 'type=gha,scope=dokku-routing-package,mode=max')
+  runtime_cache=(--cache-from 'type=gha,scope=dokku-routing-runtime' --cache-to 'type=gha,scope=dokku-routing-runtime,mode=max')
 fi
 started=$SECONDS
 
