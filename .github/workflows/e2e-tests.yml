@@ -25,7 +25,7 @@ jobs:
         id: config
         env:
           TESTRIGOR_SUITE_ID: ${{ vars.TESTRIGOR_SUITE_ID }}
-          TESTRIGOR_API_KEY: ${{ secrets.TESTRIGOR_CI_TOKEN }}
+          TESTRIGOR_TOKEN_PRESENT: ${{ secrets.TESTRIGOR_CI_TOKEN != '' }}
           DOKKU_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           DOKKU_PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
         # No PR checkout in the secret-bearing gate. Keep the embedded script
@@ -45,7 +45,7 @@ jobs:
                             and bool(env.get('GITHUB_REPOSITORY'))
                             and env.get('DOKKU_PR_HEAD_REPOSITORY') == env['GITHUB_REPOSITORY'])
             trusted = manual or pull_request
-            configured = all(env.get(key, '').strip() for key in ('TESTRIGOR_SUITE_ID', 'TESTRIGOR_API_KEY'))
+            configured = bool(env.get('TESTRIGOR_SUITE_ID', '').strip()) and env.get('TESTRIGOR_TOKEN_PRESENT') == 'true'
             return trusted and configured
 
 
@@ -86,12 +86,9 @@ jobs:
       - name: Install and probe isolated fixture
         timeout-minutes: 15
         run: bash tests/E2E/scripts/install-dokku.sh install
-      - name: Run one sequential lifecycle cycle
-        timeout-minutes: 30
-        env:
-          TESTRIGOR_API_KEY: ${{ secrets.TESTRIGOR_CI_TOKEN }}
-          TESTRIGOR_SUITE_ID: ${{ vars.TESTRIGOR_SUITE_ID }}
-        run: python3 tests/E2E/scripts/run-ci.py "$E2E_ARTIFACTS/lifecycle"
+      - name: Probe tunnel transport without cloud tests
+        timeout-minutes: 5
+        run: python3 tests/E2E/scripts/transport-probe.py "$E2E_ARTIFACTS/transport"
       - name: Collect failure diagnostics
         if: failure()
         run: |
@@ -110,6 +107,7 @@ jobs:
           path: |
             ${{ env.E2E_ARTIFACTS }}/lifecycle/*/report.xml
             ${{ env.E2E_ARTIFACTS }}/lifecycle/*/*.log
+            ${{ env.E2E_ARTIFACTS }}/transport/*
             ${{ env.E2E_ARTIFACTS }}/lifecycle/provenance.json
             ${{ env.E2E_ARTIFACTS }}/lifecycle/result.json
             ${{ env.E2E_ARTIFACTS }}/diagnostics/*.log

@@ -11,7 +11,7 @@ def evaluate(env):
                   and bool(env.get('GITHUB_REPOSITORY'))
                   and env.get('DOKKU_PR_HEAD_REPOSITORY') == env['GITHUB_REPOSITORY'])
   trusted = manual or pull_request
-  configured = all(env.get(key, '').strip() for key in ('TESTRIGOR_SUITE_ID', 'TESTRIGOR_API_KEY'))
+  configured = bool(env.get('TESTRIGOR_SUITE_ID', '').strip()) and env.get('TESTRIGOR_TOKEN_PRESENT') == 'true'
   return trusted and configured
 
 

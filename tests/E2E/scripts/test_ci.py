@@ -44,23 +44,23 @@ class GateTests(unittest.TestCase):
     gate = load('ci-gate')
     valid = {'GITHUB_EVENT_NAME': 'workflow_dispatch', 'GITHUB_REF': 'refs/heads/master',
              'DOKKU_DEFAULT_BRANCH': 'master',
-             'TESTRIGOR_SUITE_ID': 'offline-suite', 'TESTRIGOR_API_KEY': 'offline-secret'}
+             'TESTRIGOR_SUITE_ID': 'offline-suite', 'TESTRIGOR_TOKEN_PRESENT': 'true'}
     self.assertTrue(gate.evaluate(valid))
-    for key in ('TESTRIGOR_SUITE_ID', 'TESTRIGOR_API_KEY', 'DOKKU_DEFAULT_BRANCH'):
+    for key in ('TESTRIGOR_SUITE_ID', 'TESTRIGOR_TOKEN_PRESENT', 'DOKKU_DEFAULT_BRANCH'):
       self.assertFalse(gate.evaluate({k: v for k, v in valid.items() if k != key}))
     for change in ({'GITHUB_EVENT_NAME': 'pull_request'}, {'GITHUB_EVENT_NAME': 'pull_request_target'},
                    {'GITHUB_REF': 'refs/heads/topic'},
-                   {'TESTRIGOR_API_KEY': '  '}):
+                   {'TESTRIGOR_TOKEN_PRESENT': 'false'}):
       self.assertFalse(gate.evaluate(dict(valid, **change)))
 
   def test_same_repository_pr_runs_and_fork_or_missing_config_skips(self):
     gate = load('ci-gate')
     env = {'GITHUB_EVENT_NAME': 'pull_request', 'GITHUB_REPOSITORY': 'owner/dokku',
            'DOKKU_PR_HEAD_REPOSITORY': 'owner/dokku',
-           'TESTRIGOR_SUITE_ID': 'offline-suite', 'TESTRIGOR_API_KEY': 'offline-secret'}
+           'TESTRIGOR_SUITE_ID': 'offline-suite', 'TESTRIGOR_TOKEN_PRESENT': 'true'}
     self.assertTrue(gate.evaluate(env))
     self.assertFalse(gate.evaluate(dict(env, DOKKU_PR_HEAD_REPOSITORY='fork/dokku')))
-    for key in ('TESTRIGOR_SUITE_ID', 'TESTRIGOR_API_KEY'):
+    for key in ('TESTRIGOR_SUITE_ID', 'TESTRIGOR_TOKEN_PRESENT'):
       self.assertFalse(gate.evaluate({k: v for k, v in env.items() if k != key}))
 
 

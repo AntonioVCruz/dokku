@@ -1,10 +1,12 @@
 import json
 import os
+import socket
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROLE = sys.argv[1]
 MARKER = os.environ.get('E2E_MARKER', 'dokku-backend-unconfigured')
+HOSTNAME = socket.gethostname()
 PAGE = b'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Dokku routing probe</title>
 <script src="/probe.js" defer></script></head>
@@ -31,8 +33,21 @@ class Handler(BaseHTTPRequestHandler):
             payload, content_type, status = PAGE, 'text/html; charset=utf-8', 200
         elif ROLE == 'web' and self.path == '/probe.js':
             payload, content_type, status = SCRIPT, 'text/javascript; charset=utf-8', 200
-        elif ROLE == 'api' and self.path == '/api/v0/identity':
-            payload = json.dumps({'role': ROLE, 'marker': MARKER}).encode()
+        elif self.path == '/probe-host':
+            payload = json.dumps({'role': ROLE, 'host': self.headers.get('Host')}).encode()
+            content_type, status = 'application/json', 200
+        elif ROLE == 'web' and self.path == '/healthz':
+            payload, content_type, status = b'web ready', 'text/plain', 200
+        elif ROLE == 'api' and self.path in ('/api/v0/redirect', '/redirect'):
+            self.send_response(302)
+            self.send_header('Location', '/login')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
+        elif ROLE == 'api' and self.path == '/login':
+            payload, content_type, status = b'<h1>API login page</h1>', 'text/html', 200
+        elif ROLE == 'api' and self.path in ('/api/v0/identity', '/identity', '/api/v0beta/x'):
+            payload = json.dumps({'role': ROLE, 'marker': MARKER, 'hostname': HOSTNAME}).encode()
             content_type, status = 'application/json', 200
         else:
             payload, content_type, status = b'Wrong upstream or path', 'text/plain', 404
