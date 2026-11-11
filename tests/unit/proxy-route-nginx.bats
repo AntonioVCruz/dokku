@@ -197,6 +197,12 @@ teardown() {
   assert_success
   run dokku ps:scale "$TEST_APP" web=1 api=1 admin=1
   assert_success
+  run dokku proxy:route:set "$TEST_APP" api /api/v0 --port 5001 --strip-prefix
+  assert_success
+  # The short route cannot serve the admin marker: its /admin directory is absent.
+  assert_http_localhost_response_contains "http" "${TEST_APP}.${DOKKU_DOMAIN}" "80" "/api/v0/admin/routing.txt" "" "404"
+  run dokku proxy:route:remove "$TEST_APP" /api/v0
+  assert_success
   run dokku proxy:route:set "$TEST_APP" admin /api/v0/admin --port 5002 --strip-prefix
   assert_success
   # Add the shorter route last so declaration order cannot explain precedence.
@@ -233,9 +239,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 http.server.HTTPServer(('0.0.0.0', 5001), Handler).serve_forever()
 PY
   echo short-prefix >"$APP_REPO_DIR/routing.txt"
-  mkdir -p "$APP_REPO_DIR/admin"
-  echo long-prefix >"$APP_REPO_DIR/admin/routing.txt"
-  echo "admin: python3 -m http.server 5002 --directory admin" >>"$APP_REPO_DIR/Procfile"
+  # Keep this directory distinct from /admin so api cannot serve the same marker
+  # when the shorter prefix incorrectly wins.
+  mkdir -p "$APP_REPO_DIR/admin-docroot"
+  echo long-prefix >"$APP_REPO_DIR/admin-docroot/routing.txt"
+  echo "admin: python3 -m http.server 5002 --directory admin-docroot" >>"$APP_REPO_DIR/Procfile"
 }
 
 assert_routed_response() {
