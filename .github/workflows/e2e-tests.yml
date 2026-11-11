@@ -12,6 +12,11 @@ on:
   schedule:
     - cron: '23 4 * * 1'
   workflow_dispatch:
+    inputs:
+      negative_controls:
+        description: 'Development only: verify all seven wrong-state controls fail their assertions'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -111,7 +116,13 @@ jobs:
         env:
           TESTRIGOR_API_KEY: ${{ secrets.TESTRIGOR_CI_TOKEN }}
           TESTRIGOR_SUITE_ID: ${{ vars.TESTRIGOR_SUITE_ID }}
-        run: python3 tests/E2E/scripts/run-ci.py "$E2E_ARTIFACTS/lifecycle"
+          NEGATIVE_CONTROLS: ${{ github.event_name == 'workflow_dispatch' && inputs.negative_controls || false }}
+        run: |
+          args=()
+          if [[ "$NEGATIVE_CONTROLS" == true ]]; then
+            args+=(--negative-controls)
+          fi
+          python3 tests/E2E/scripts/run-ci.py "$E2E_ARTIFACTS/lifecycle" "${args[@]}"
       - name: Collect failure diagnostics
         if: failure()
         run: |
@@ -130,6 +141,8 @@ jobs:
           path: |
             ${{ env.E2E_ARTIFACTS }}/lifecycle/positive/*/report.xml
             ${{ env.E2E_ARTIFACTS }}/lifecycle/positive/*/*.log
+            ${{ env.E2E_ARTIFACTS }}/lifecycle/negative/*/report.xml
+            ${{ env.E2E_ARTIFACTS }}/lifecycle/negative/*/*.log
             ${{ env.E2E_ARTIFACTS }}/lifecycle/provenance.json
             ${{ env.E2E_ARTIFACTS }}/lifecycle/result.json
             ${{ env.E2E_ARTIFACTS }}/diagnostics/*.log
