@@ -43,10 +43,15 @@ but no explicit guarantee for a continuous client of a routed non-web process
 was established. TC-09 intentionally asserts a user expectation rather than a
 documented redirect-rewrite contract and never runs in CI.
 
-Retry limit: 2, confirmed by the suite owner on November 11, 2026. CLI 2.0.9's
-`dist/commands/test-suite/run.js:170` accepts settings, but no authoritative retry
-field/schema was found; no guessed settings file is sent. This is not retry-free
-evidence. Negative controls run only during development and retain red results.
+Historical retry limit: 2, confirmed by the suite owner on November 11, 2026.
+The local results above predate the zero-retry setting and are not retry-free evidence.
+The testRigor team subsequently confirmed `maximumNumerOfRetries` (without the b),
+citing its sample `test_data/Settings.yaml:37`, as relayed by the suite owner.
+That sample was not independently inspected. `settings.json:2` now requests zero
+failed-test retries, and `scripts/run-ci.py` supplies it through `--settings-path`
+for every browser execution, including development controls and characterization.
+An execution with this setting has not yet been verified against the service.
+Negative controls run only during development and retain red results.
 
 The previous hosted run [42880164031](https://github.com/AntonioVCruz/dokku/actions/runs/42880164031)
 took 12m43s, including a 5m12s source build. Its five old lifecycle stages do not

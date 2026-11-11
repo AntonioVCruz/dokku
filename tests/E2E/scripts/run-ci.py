@@ -118,6 +118,7 @@ class Controller:
       raise RuntimeError('Syntax validation failed; no browser verdict')
     args = ['test-suite', 'run', self.suite, '--localhost', '--url', 'http://localhost:19080',
             '--test-cases-path', str(case), '--variables-path', str(values),
+            '--settings-path', str(ROOT / 'settings.json'),
             '--labels', 'contract-pending' if number == 9 else 'routing',
             '--branch', os.environ['DOKKU_HARNESS_BRANCH'], '--commit', os.environ['DOKKU_SOURCE_REVISION'],
             '--min-port', '48196', '--max-port', '48196',
@@ -220,8 +221,9 @@ class Controller:
       raise RuntimeError('Installed CLI differs from package.json')
     image = json.loads(self.command(['docker', 'image', 'inspect', os.environ['DOKKU_E2E_IMAGE'], '--format', '{{json .}}']))
     provenance = {'sourceRevision': revision, 'harnessRevision': revision, 'suiteID': self.suite,
-      'cliVersion': version, 'runtimeImageID': image['Id'], 'maximumRetries': 2,
-      'retrySource': 'Suite owner confirmation, 2026-11-11; settings key unverified',
+      'cliVersion': version, 'runtimeImageID': image['Id'],
+      'requestedMaximumRetries': json.loads((ROOT / 'settings.json').read_text())['maximumNumerOfRetries'],
+      'retrySource': 'Versioned settings.json; field confirmed by testRigor team via suite owner',
       'hashes': {str(p.relative_to(REPO)): hashlib.sha256(p.read_bytes()).hexdigest()
                  for p in ROOT.rglob('*') if 'node_modules' not in p.parts and '__pycache__' not in p.parts and p.is_file()}}
     (self.artifacts / 'provenance.json').write_text(json.dumps(provenance, indent=2))

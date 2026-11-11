@@ -127,6 +127,26 @@ class OracleTests(unittest.TestCase):
 
 
 class BoundaryTests(unittest.TestCase):
+  def test_every_browser_run_supplies_versioned_zero_retry_settings(self):
+    runner = load('run-ci')
+    with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ,
+      {'TESTRIGOR_API_KEY': 'offline-token', 'TESTRIGOR_SUITE_ID': 'suite',
+       'DOKKU_HARNESS_BRANCH': 'test/testrigor-browser-e2e', 'DOKKU_SOURCE_REVISION': 'a' * 40}):
+      c = runner.Controller(Path(folder) / 'out')
+      def cli(args, log):
+        if args[1] == 'run':
+          settings = Path(args[args.index('--settings-path') + 1])
+          self.assertEqual(settings, runner.ROOT / 'settings.json')
+          self.assertEqual(json.loads(settings.read_text()), {'maximumNumerOfRetries': 0})
+          report = Path(args[args.index('--junit-report-save-path') + 1])
+          report.write_text('<testsuites><testcase/><property name="taskId" value="offline-run"/></testsuites>')
+        return 0
+      with patch.object(c, 'cli_process', cli):
+        for number, negative in ((1, False), (1, True), (9, False)):
+          passed, result = c.browser(number, {}, negative)
+          self.assertTrue(passed)
+          self.assertEqual(result['runID'], 'offline-run')
+
   def test_cli_child_receives_token_and_logs_are_redacted(self):
     runner = load('run-ci')
     token = 'offline-never-persist-secret'

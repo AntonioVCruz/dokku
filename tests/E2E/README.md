@@ -58,9 +58,9 @@ emit a notice and summary, then skip. Per-suite concurrency never cancels an
 active run. Reserve the suite against external/manual clients too: starting
 another testRigor run can cancel one already using it.
 
-The suite owner confirmed two automatic retries on November 11, 2026. The CLI
-accepts settings JSON/YAML but exposes no validated retry key. No settings file
-is guessed or sent. Retry-free execution remains unverified; see COVERAGE.md.
+Every run passes `settings.json` through `--settings-path`, requesting zero failed-test
+retries with `maximumNumerOfRetries` (spelling confirmed by the testRigor team).
+Earlier results used the owner's reported limit of two; see COVERAGE.md.
 Ordinary runs omit `--explicit-mutations`, preserving saved suite objects.
 
 JUnit, redacted CLI logs, provenance and build diagnostics are retained for seven
