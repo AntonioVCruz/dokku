@@ -161,12 +161,12 @@ teardown() {
   assert_success
   run dokku config:set "$TEST_APP" ROUTE_TEST_MARKER=before-rollout
   assert_success
-  assert_routed_response "/api/v0/identity" "before-rollout"
+  assert_routed_response "/api/v0/identity" "api:before-rollout"
 
   run dokku config:set "$TEST_APP" ROUTE_TEST_MARKER=after-rollout
   echo "output: $output"
   assert_success
-  assert_routed_response "/api/v0/identity" "after-rollout"
+  assert_routed_response "/api/v0/identity" "api:after-rollout"
 }
 
 @test "(proxy-route:nginx) remove then re-add restores routing" {
@@ -227,7 +227,8 @@ import os
 class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/identity':
-            body = os.environ.get('ROUTE_TEST_MARKER', 'unset').encode()
+            # web's environment dump contains the marker too; identify api explicitly.
+            body = ('api:' + os.environ.get('ROUTE_TEST_MARKER', 'unset')).encode()
             self.send_response(200)
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
