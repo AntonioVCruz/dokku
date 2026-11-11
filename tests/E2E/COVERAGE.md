@@ -60,3 +60,37 @@ and 15.48 minutes before failing runtime-package installation with DNS errors
 (runs 43036399471, 43036437004 and 43041069466). No successful cached comparison
 was obtained, so the cache experiment was removed. Source timing is included in
 each new run's build-timing JSON; no cost reduction is claimed from failed builds.
+
+## Hosted validation
+
+[Gating run 43065764222](https://github.com/AntonioVCruz/dokku/actions/runs/43065764222)
+passed all seven cases and post-case checks, with no cleanup failures. Its actual
+source/harness revision was PR merge `6b57a16bf6f6921b96ed5053b64a90d6797a6898`,
+containing head `8c497d2b81b41de5a4370b118a912593078c1d20` with an identical tree.
+[Control run 43069508347](https://github.com/AntonioVCruz/dokku/actions/runs/43069508347)
+at `7eb25a091c61183a2b921b8daf50b57175c4cf53` verified all seven expected assertion
+failures, agreeing post-case checks and successful cleanup. A green control job
+means the wrong-state browser verdicts failed as intended, not that they passed.
+
+| Case | Hosted browser run ID | Hosted negative-control run ID |
+| --- | --- | --- |
+| TC-01 | ujEXYBQByvv7P7BGb (pass) | Jkn2M3kM5fEarAPnc (assertion failure) |
+| TC-02 | pGpDmTMh3yWhmakWp (pass) | sMv4Dhi2uRME9iYun (assertion failure) |
+| TC-03 | rY3hnn7ncF8wkuoeC (pass) | Ja4aAcF2pQDxHwo85 (assertion failure) |
+| TC-04 | QXPrqYJxCz36auikG (pass) | BNw4oFsz9CefxmYkE (assertion failure) |
+| TC-05 | 8djTqdngNxp2iMFeW (pass) | MaNACkzeeY4ATKt5a (assertion failure) |
+| TC-06 | dfz8KthJCEpfcWDiN (pass) | pyj6Qf5sABp3nyTc4 (assertion failure) |
+| TC-08 | K2f2HubPtFaJ5XDnF (pass) | BHLw83HLaSG9jDLyW (assertion failure) |
+
+Both runs requested `maximumNumerOfRetries: 0`; settings/controller hashes match
+their Git revisions. Retained JUnit/CLI output does not expose an effective retry
+or attempt count, so no independently verified first-attempt claim is made.
+The live WebSocket case also checked HTTP/WebSocket Host `localhost:19080` on the
+hosted runner. TC-09 remains excluded from gating and TC-07 remains unauthored.
+
+Manual development controls can be dispatched with the workflow's
+`negative_controls` input. PRs, schedules and ordinary dispatches retain the seven
+positive gating cases. Controls are never counted toward a gating reliability streak.
+Source-build/job durations were 7.87/21.43 minutes for the positive run and
+6.97/26.43 minutes for the controls. These are observed durations, not a performance
+comparison. The earlier failed durations above are DNS diagnostic elapsed times.
