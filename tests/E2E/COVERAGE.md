@@ -15,7 +15,7 @@ JavaScript fetch behavior after state changes, not a claim of new native coverag
 | TC-06 WebSocket | `websocket upgrade headers are present in rendered config` (line 117) | New live browser WebSocket | Test-generated message; config marker; independently specified Host | Remove /ws route | Bto8N5hYNk2NGhDnZ (failed at assertion) | JKDRZ8KWu3dYWYKYR (pass) |
 | TC-07 continuous client | No live continuous-client test | Contract-pending, not authored or gating | Non-web restart availability guarantee unconfirmed | Would scale API to zero | Not run | Not run |
 | TC-08 scaled to zero | No rendered error-page test | New browser error page | Repository `500-error.html` heading/detail; post-case HTTP 502 | Keep API at one | SJaMeDCf9hMJ87dsW (failed at assertion) | Xuqn2FzZYDjZ8M4aD (pass) |
-| TC-09 prefix-stripped redirect | No browser redirect test | Contract-pending, characterization only | Fixture's literal API login page | Scale API to zero | pcAgvMJ838AcuPdwC (failed during navigation; assertion not reached) | z2NZh7LXsJEzuoCSY (404 navigation) |
+| TC-09 prefix-stripped redirect | No browser redirect test | Contract-pending, characterization only | Fixture's literal API login page | Add a more-specific stripped route to API root | en29rGjRQugyPTvwD (failed at heading assertion) | z2NZh7LXsJEzuoCSY (404 navigation) |
 | TC-10 reserved | Prefix boundary and overlap belong to native track | No browser case | Not applicable | Not applicable | Not run | Not run |
 
 The routing contract describes longest-prefix-first matching and the web
@@ -34,8 +34,8 @@ their run URL and tested revision; see the fork PR checks for individual executi
 The local gating cases and negative controls above ran at source/harness revision
 `d04ebd6bbb5cbbceb742a756d73f2404c297e130`; all seven gating controls failed their
 assertions and agreed with the independent post-case checks. TC-09 stopped at
-HTTP 404 during navigation; its wrong-state control is reported separately and
-is not a proof that the later login-heading assertion executed.
+HTTP 404 during navigation. Its original control stopped at 502 and is not
+credited; the repaired heading control is recorded in the follow-up below.
 
 TC-07 stays contract-pending: `docs/deployment/zero-downtime-deploys.md:15`
 describes deployment switching, and `plugins/ps/ps.go:88` invokes deployment,
@@ -94,3 +94,9 @@ positive gating cases. Controls are never counted toward a gating reliability st
 Source-build/job durations were 7.87/21.43 minutes for the positive run and
 6.97/26.43 minutes for the controls. These are observed durations, not a performance
 comparison. The earlier failed durations above are DNS diagnostic elapsed times.
+
+Redirect control follow-up: local run `en29rGjRQugyPTvwD` at `6efa52c8fd088821506511d7e5d904d73f26458b`
+failed the unchanged API-login-heading assertion after navigation to an HTTP200
+API root page. The controller removed the added route and verified restoration.
+The earlier control `pcAgvMJ838AcuPdwC` failed navigation with502 and remains
+historical evidence only; it is not credited as assertion sensitivity.
