@@ -135,6 +135,121 @@ teardown() {
   assert_output_contains "proxy_set_header Connection \$http_connection" -1
 }
 
+@test "(proxy-route:nginx) route survives process restart" {
+  run deploy_app python "dokku@$DOKKU_DOMAIN:$TEST_APP" add_lifecycle_api_process_callback
+  echo "output: $output"
+  assert_success
+  run dokku ps:scale "$TEST_APP" web=1 api=1
+  assert_success
+  run dokku proxy:route:set "$TEST_APP" api /api/v0 --port 5001 --strip-prefix
+  assert_success
+  assert_routed_response "/api/v0/routing.txt" "short-prefix"
+
+  run dokku ps:restart "$TEST_APP"
+  echo "output: $output"
+  assert_success
+  assert_routed_response "/api/v0/routing.txt" "short-prefix"
+}
+
+@test "(proxy-route:nginx) configuration rollout reaches routed process" {
+  run deploy_app python "dokku@$DOKKU_DOMAIN:$TEST_APP" add_lifecycle_api_process_callback
+  echo "output: $output"
+  assert_success
+  run dokku ps:scale "$TEST_APP" web=1 api=1
+  assert_success
+  run dokku proxy:route:set "$TEST_APP" api /api/v0 --port 5001 --strip-prefix
+  assert_success
+  run dokku config:set "$TEST_APP" ROUTE_TEST_MARKER=before-rollout
+  assert_success
+  assert_routed_response "/api/v0/identity" "before-rollout"
+
+  run dokku config:set "$TEST_APP" ROUTE_TEST_MARKER=after-rollout
+  echo "output: $output"
+  assert_success
+  assert_routed_response "/api/v0/identity" "after-rollout"
+}
+
+@test "(proxy-route:nginx) remove then re-add restores routing" {
+  run dokku config:set --no-restart "$TEST_APP" ROUTE_TEST_MARKER=web-fallback-control
+  assert_success
+  run deploy_app python "dokku@$DOKKU_DOMAIN:$TEST_APP" add_lifecycle_api_process_callback
+  echo "output: $output"
+  assert_success
+  run dokku ps:scale "$TEST_APP" web=1 api=1
+  assert_success
+  run dokku proxy:route:set "$TEST_APP" api /api/v0 --port 5001 --strip-prefix
+  assert_success
+  assert_routed_response "/api/v0/routing.txt" "short-prefix"
+  run dokku proxy:route:remove "$TEST_APP" /api/v0
+  assert_success
+  # Unlike api's static file, web's catch-all returns its environment.
+  assert_routed_response "/api/v0/routing.txt" '"ROUTE_TEST_MARKER": "web-fallback-control"'
+
+  run dokku proxy:route:set "$TEST_APP" api /api/v0 --port 5001 --strip-prefix
+  echo "output: $output"
+  assert_success
+  assert_routed_response "/api/v0/routing.txt" "short-prefix"
+}
+
+@test "(proxy-route:nginx) longest overlapping prefix wins on live requests" {
+  run deploy_app python "dokku@$DOKKU_DOMAIN:$TEST_APP" add_lifecycle_api_process_callback
+  echo "output: $output"
+  assert_success
+  run dokku ps:scale "$TEST_APP" web=1 api=1 admin=1
+  assert_success
+  run dokku proxy:route:set "$TEST_APP" admin /api/v0/admin --port 5002 --strip-prefix
+  assert_success
+  # Add the shorter route last so declaration order cannot explain precedence.
+  run dokku proxy:route:set "$TEST_APP" api /api/v0 --port 5001 --strip-prefix
+  assert_success
+  assert_routed_response "/api/v0/routing.txt" "short-prefix"
+  assert_routed_response "/api/v0/admin/routing.txt" "long-prefix"
+}
+
+add_lifecycle_api_process_callback() {
+  local APP="$1"
+  local APP_REPO_DIR="$2"
+  add_api_process_callback "$APP" "$APP_REPO_DIR"
+  convert_to_dockerfile "$APP" "$APP_REPO_DIR"
+  # A small live endpoint reads the environment of the routed process itself.
+  sed -i 's/api: python3 -m http.server 5001/api: python3 api.py/' "$APP_REPO_DIR/Procfile"
+  cat >"$APP_REPO_DIR/api.py" <<'PY'
+import http.server
+import os
+
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/identity':
+            body = os.environ.get('ROUTE_TEST_MARKER', 'unset').encode()
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            super().do_GET()
+
+
+http.server.HTTPServer(('0.0.0.0', 5001), Handler).serve_forever()
+PY
+  echo short-prefix >"$APP_REPO_DIR/routing.txt"
+  mkdir -p "$APP_REPO_DIR/admin"
+  echo long-prefix >"$APP_REPO_DIR/admin/routing.txt"
+  echo "admin: python3 -m http.server 5002 --directory admin" >>"$APP_REPO_DIR/Procfile"
+}
+
+assert_routed_response() {
+  local path="$1" expected="$2" body attempt
+  # Both upstreams return 200; status-only polling can observe the old worker.
+  # Wait for the exact body condition before applying the shared assertions.
+  for attempt in $(seq 1 30); do
+    body=$(curl --connect-to "${TEST_APP}.${DOKKU_DOMAIN}:80:localhost:80" -kfSs "http://${TEST_APP}.${DOKKU_DOMAIN}:80$path") || true
+    [[ "$body" == *"$expected"* ]] && break
+    sleep 1
+  done
+  assert_http_localhost_response_contains "http" "${TEST_APP}.${DOKKU_DOMAIN}" "80" "$path" "$expected"
+}
+
 add_api_process_callback() {
   local APP="$1"
   local APP_REPO_DIR="$2"
