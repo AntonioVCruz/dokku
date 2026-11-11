@@ -4,6 +4,13 @@ name: Browser E2E (opt-in)
 # yamllint disable-line rule:truthy
 on:
   pull_request:
+    paths:
+      - 'tests/E2E/**'
+      - 'plugins/proxy/**'
+      - 'plugins/nginx-vhosts/**'
+      - '.github/workflows/e2e-tests.yml'
+  schedule:
+    - cron: '23 4 * * 1'
   workflow_dispatch:
 
 permissions:
@@ -38,15 +45,24 @@ jobs:
 
 
           def evaluate(env):
-            manual = (env.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
-                      and bool(env.get('DOKKU_DEFAULT_BRANCH'))
-                      and env.get('GITHUB_REF') == 'refs/heads/' + env['DOKKU_DEFAULT_BRANCH'])
+            manual = env.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
+            scheduled = (env.get('GITHUB_EVENT_NAME') == 'schedule'
+                         and bool(env.get('DOKKU_DEFAULT_BRANCH'))
+                         and env.get('GITHUB_REF') == 'refs/heads/' + env['DOKKU_DEFAULT_BRANCH'])
             pull_request = (env.get('GITHUB_EVENT_NAME') == 'pull_request'
                             and bool(env.get('GITHUB_REPOSITORY'))
                             and env.get('DOKKU_PR_HEAD_REPOSITORY') == env['GITHUB_REPOSITORY'])
-            trusted = manual or pull_request
+            trusted = manual or scheduled or pull_request
             configured = bool(env.get('TESTRIGOR_SUITE_ID', '').strip()) and env.get('TESTRIGOR_TOKEN_PRESENT') == 'true'
             return trusted and configured
+
+
+          def reason(env):
+            if not env.get('TESTRIGOR_SUITE_ID', '').strip():
+              return 'suite ID is not configured'
+            if env.get('TESTRIGOR_TOKEN_PRESENT') != 'true':
+              return 'CI token is not configured'
+            return 'event is not a same-repository PR, manual dispatch or default-branch schedule'
 
 
           if __name__ == '__main__':
@@ -54,7 +70,11 @@ jobs:
             value = 'true' if enabled else 'false'
             with Path(os.environ['GITHUB_OUTPUT']).open('a', encoding='utf-8') as output:
               output.write('enabled=' + value + '\n')
-            print('Browser E2E enabled.' if enabled else 'Browser E2E skipped: requires suite/token and a same-repository PR or default-branch manual dispatch.')
+            message = 'Browser E2E enabled.' if enabled else 'Browser E2E skipped: ' + reason(os.environ)
+            print(message if enabled else '::notice::' + message)
+            if os.environ.get('GITHUB_STEP_SUMMARY'):
+              with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a', encoding='utf-8') as summary:
+                summary.write(message + '\n')
           PY
 
   browser:
@@ -72,11 +92,11 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7
         with:
-          node-version: '22.15.0'
+          node-version-file: tests/E2E/.node-version
       - name: Select unique artifact directory
         run: printf 'E2E_ARTIFACTS=%s/dokku-e2e-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
-      - name: Install pinned testRigor CLI
-        run: npm install --global @testrigor/testrigor-cli@2.0.9
+      - name: Install locked testRigor CLI
+        run: npm ci --prefix tests/E2E
       - name: Build checked-out Dokku source
         timeout-minutes: 60
         run: |
@@ -86,9 +106,12 @@ jobs:
       - name: Install and probe isolated fixture
         timeout-minutes: 15
         run: bash tests/E2E/scripts/install-dokku.sh install
-      - name: Probe tunnel transport without cloud tests
-        timeout-minutes: 5
-        run: python3 tests/E2E/scripts/transport-probe.py "$E2E_ARTIFACTS/transport"
+      - name: Run sequential routing cases
+        timeout-minutes: 45
+        env:
+          TESTRIGOR_API_KEY: ${{ secrets.TESTRIGOR_CI_TOKEN }}
+          TESTRIGOR_SUITE_ID: ${{ vars.TESTRIGOR_SUITE_ID }}
+        run: python3 tests/E2E/scripts/run-ci.py "$E2E_ARTIFACTS/lifecycle"
       - name: Collect failure diagnostics
         if: failure()
         run: |

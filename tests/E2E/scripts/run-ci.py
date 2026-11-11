@@ -1,5 +1,7 @@
-"""One sequential lifecycle cycle using a dedicated CI suite; Linux, stdlib only."""
+"""Sequential browser oracles with neutral readiness and post-case HTTP checks."""
+import argparse
 import hashlib
+import html
 import json
 import os
 from pathlib import Path
@@ -12,146 +14,253 @@ import urllib.request
 import uuid
 import xml.etree.ElementTree as ET
 
+from importlib.util import module_from_spec, spec_from_file_location
+
 ROOT = Path(__file__).resolve().parents[1]
 REPO = ROOT.parents[1]
+GATING = (1, 2, 3, 4, 5, 6, 8)
 
 
-def execute(artifacts):
-  token = os.environ['TESTRIGOR_API_KEY']
-  suite = os.environ['TESTRIGOR_SUITE_ID']
-  if not token.strip() or not re.fullmatch(r'[A-Za-z0-9_-]+', suite):
-    raise ValueError('Nonempty CI token and valid dedicated suite ID required')
-  image = os.environ['DOKKU_E2E_IMAGE']
-  revision = os.environ['DOKKU_SOURCE_REVISION']
-  artifacts.mkdir(parents=True, exist_ok=False)
-  # Tokens are passed only to CLI children, never Docker, commands, or files.
-  local_env = {k: v for k, v in os.environ.items() if k != 'TESTRIGOR_API_KEY'}
-  cli_env = os.environ.copy()
-  cli_env['TESTRIGOR_CLI_HOME'] = str(artifacts / 'cli-home')
-  compose = ['docker', 'compose', '-f', str(ROOT / 'compose.yml')]
-  results = []
+def read_http(path):
+  try:
+    with urllib.request.urlopen('http://localhost:19080' + path, timeout=10) as r:
+      return r.status, r.read().decode()
+  except urllib.error.HTTPError as r:
+    return r.code, r.read().decode()
 
-  def command(args):
-    result = subprocess.run(args, cwd=REPO, env=local_env, capture_output=True,
-                text=True, encoding='utf-8', errors='replace', check=True)
-    return result.stdout.strip()
 
-  def dokku(*args):
-    return command(compose + ['exec', '-T', 'dokku', 'dokku', *args])
+def verdict(report, exit_code):
+  tree = ET.parse(report)
+  cases = tree.findall('.//testcase')
+  if len(cases) != 1 or tree.findall('.//error') or tree.findall('.//skipped'):
+    raise RuntimeError('Expected exactly one completed browser verdict')
+  run_id = next((e.get('value') for e in tree.iter() if e.get('name') == 'taskId'), None)
+  if not run_id:
+    raise RuntimeError('Missing cloud run ID')
+  failures = tree.findall('.//failure')
+  passed = exit_code == 0 and not failures
+  if not passed and not failures:
+    raise RuntimeError('CLI failed without a browser assertion verdict')
+  return passed, run_id, [e.get('message', '') for e in failures]
 
-  def wait_api(marker, absent=False):
+
+def agree(browser, observed):
+  if browser != observed:
+    raise RuntimeError('oracle disagreement: browser and post-case cross-check differ')
+
+
+class Controller:
+  def __init__(self, artifacts):
+    self.artifacts = artifacts
+    artifacts.mkdir(parents=True, exist_ok=False)
+    self.token = os.environ['TESTRIGOR_API_KEY']
+    self.suite = os.environ['TESTRIGOR_SUITE_ID']
+    if not self.token.strip() or not re.fullmatch(r'[A-Za-z0-9_-]+', self.suite):
+      raise ValueError('Nonempty CI token and valid suite ID required')
+    self.local_env = {k: v for k, v in os.environ.items() if k != 'TESTRIGOR_API_KEY'}
+    self.cli_env = dict(self.local_env, TESTRIGOR_API_KEY=self.token,
+                        TESTRIGOR_CLI_HOME=str(artifacts / 'cli-home'))
+    self.cli = str(ROOT / 'node_modules/.bin/testrigor')
+    self.compose = ['docker', 'compose', '-f', str(ROOT / 'compose.yml')]
+    self.results = []
+
+  def command(self, args):
+    return subprocess.check_output(args, cwd=REPO, env=self.local_env,
+                                   text=True, encoding='utf-8', stderr=subprocess.PIPE).strip()
+
+  def dokku(self, *args):
+    return self.command(self.compose + ['exec', '-T', 'dokku', 'dokku', *args])
+
+  def hostname(self):
+    # Inspect the named active container, not the response under test or retiring containers.
+    return self.command(self.compose + ['exec', '-T', 'dokku', 'docker', 'inspect',
+                        'browser-probe.api.1', '--format', '{{.Config.Hostname}}'])
+
+  def neutral_ready(self):
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
       try:
-        with urllib.request.urlopen('http://localhost:19080/api/v0/identity', timeout=10) as response:
-          if not absent and json.load(response) == {'role': 'api', 'marker': marker}:
-            return
-      except urllib.error.HTTPError as error:
-        if absent and error.code == 404 and error.read() == b'Wrong upstream or path':
+        if read_http('/healthz') == (200, 'web ready'):
+          self.command(self.compose + ['exec', '-T', 'dokku', 'nginx', '-t'])
           return
-      except (OSError, ValueError):
+      except OSError:
         pass
       time.sleep(1)
-    raise RuntimeError('Local API readiness condition timed out')
+    raise RuntimeError('Neutral web readiness timed out')
 
-  def run_case(stage, filename, label, variables):
-    folder = artifacts / stage
-    folder.mkdir()
+  def route(self, present=True, strip=False):
+    if present:
+      self.dokku('proxy:route:set', 'browser-probe', 'api', '/api/v0', '--port', '5001',
+                 *(['--strip-prefix'] if strip else []))
+    else:
+      self.dokku('proxy:route:remove', 'browser-probe', '/api/v0')
+
+  def cli_process(self, args, log):
+    code = None
+    with log.open('w', encoding='utf-8') as stream:
+      process = subprocess.Popen([self.cli, *args], cwd=REPO, env=self.cli_env,
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding='utf-8', errors='replace')
+      for line in process.stdout:
+        safe = line.replace(self.token, '[REDACTED]')
+        stream.write(safe); stream.flush(); print(safe, end='', flush=True)
+      code = process.wait()
+    return code
+
+  def browser(self, number, variables, negative):
+    folder = self.artifacts / ('negative-' if negative else 'positive-') / f'TC-{number:02d}'
+    folder.mkdir(parents=True)
     values = folder / 'variables.json'
     values.write_text(json.dumps(variables), encoding='utf-8')
-    case = ROOT / 'test-cases' / filename
-    # Strict syntax validation does not execute or replace suite objects.
-    validation = ['testrigor', 'test-suite', 'validate-syntax', suite,
-           '--test-cases-path', str(case), '--explicit-mutations']
-    args = ['testrigor', 'test-suite', 'run', suite, '--localhost', '--url', 'http://localhost:19080',
-        '--test-cases-path', str(case), '--variables-path', str(values), '--labels', label,
-        '--branch', os.environ['DOKKU_HARNESS_BRANCH'], '--commit', revision,
-        '--min-port', '48196', '--max-port', '48196',
-        '--junit-report-save-path', str(folder / 'report.xml')]
-    exit_code = None
-    for name, argv in [('validation', validation), ('cli', args)]:
-      with (folder / (name + '.log')).open('w', encoding='utf-8') as log:
-        process = subprocess.Popen(argv, cwd=REPO, env=cli_env, stdin=subprocess.DEVNULL,
-          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace')
-        for line in process.stdout:
-          safe = line.replace(token, '[REDACTED]')
-          log.write(safe); log.flush(); print(safe, end='', flush=True)
-        exit_code = process.wait()
-      if exit_code:
-        results.append({'stage': stage, 'operation': name, 'exitCode': exit_code})
-        raise RuntimeError(stage + ' ' + name + ' failed')
-    tree = ET.parse(folder / 'report.xml')
-    counts = {name: len(tree.findall('.//' + tag)) for name, tag in
-         [('tests', 'testcase'), ('failures', 'failure'), ('errors', 'error'), ('skipped', 'skipped')]}
-    run_id = next((e.get('value') for e in tree.iter() if e.get('name') == 'taskId'), None)
-    results.append({'stage': stage, 'exitCode': exit_code, 'junit': counts, 'runID': run_id})
-    if counts != {'tests': 1, 'failures': 0, 'errors': 0, 'skipped': 0} or not run_id:
-      raise RuntimeError(stage + ' did not produce one passing test and a run ID')
+    case, = ROOT.glob(f'test-cases/TC-{number:02d} *.yaml')
+    base = ['test-suite', 'validate-syntax', self.suite, '--test-cases-path', str(case), '--explicit-mutations']
+    if self.cli_process(base, folder / 'validation.log'):
+      raise RuntimeError('Syntax validation failed; no browser verdict')
+    args = ['test-suite', 'run', self.suite, '--localhost', '--url', 'http://localhost:19080',
+            '--test-cases-path', str(case), '--variables-path', str(values),
+            '--labels', 'contract-pending' if number == 9 else 'routing',
+            '--branch', os.environ['DOKKU_HARNESS_BRANCH'], '--commit', os.environ['DOKKU_SOURCE_REVISION'],
+            '--min-port', '48196', '--max-port', '48196',
+            '--junit-report-save-path', str(folder / 'report.xml')]
+    code = self.cli_process(args, folder / 'cli.log')
+    passed, run_id, failures = verdict(folder / 'report.xml', code)
+    result = {'case': f'TC-{number:02d}', 'negativeControl': negative, 'browserPassed': passed,
+              'exitCode': code, 'runID': run_id, 'failureMessages': failures}
+    self.results.append(result)
+    return passed, result
 
-  cli_version = subprocess.check_output(['testrigor', '--version'], env=cli_env, text=True).strip()
-  if '/2.0.9 ' not in cli_version:
-    raise RuntimeError('Expected testRigor CLI 2.0.9')
-  if command(['git', 'rev-parse', 'HEAD']) != revision:
-    raise RuntimeError('Checkout differs from requested source revision')
-  if command(compose + ['exec', '-T', 'dokku', 'cat', '/var/lib/dokku/GIT_REV']) != revision:
-    raise RuntimeError('Installed Dokku revision differs from checkout')
-  if dokku('config:get', 'browser-probe', 'E2E_FIXTURE_OWNER') != 'dokku-browser-e2e':
-    raise RuntimeError('Refusing to change an unowned app')
-  original = dokku('config:get', 'browser-probe', 'E2E_MARKER')
-  route = dokku('proxy:route:report', 'browser-probe')
-  if not original.startswith('dokku-backend-') or route.count('/api/v0') != 1 or '-> api:5001' not in route:
-    raise RuntimeError('Unexpected fixture state')
-  replacement = 'dokku-backend-' + str(uuid.uuid4())
-  files = {str(p.relative_to(REPO)): hashlib.sha256(p.read_bytes()).hexdigest()
-      for p in ROOT.rglob('*') if p.is_file()}
-  provenance = {'sourceRevision': revision, 'harnessRevision': command(['git', 'rev-parse', 'HEAD']),
-    'harnessHashes': files, 'cliVersion': cli_version, 'url': 'http://localhost:19080',
-    'runtimeImage': json.loads(command(['docker', 'image', 'inspect', image, '--format', '{{json .}}'])),
-    'originalMarker': original, 'replacementMarker': replacement, 'suiteID': suite,
-    'automaticRetries': 'Inherited settings; verify and record before hosted use', 'hostedConnectivity': 'unverified until this job succeeds'}
-  (artifacts / 'provenance.json').write_text(json.dumps(provenance, indent=2), encoding='utf-8')
-  healthy = 'TC-01 Browser renders the routed backend identity.yaml'
-  passed = False
-  try:
-    wait_api(original)
-    run_case('baseline', healthy, 'dokku-browser-smoke', {'expectedBackendMarker': original})
-    dokku('ps:restart', 'browser-probe'); wait_api(original)
-    run_case('restart', healthy, 'dokku-browser-smoke', {'expectedBackendMarker': original})
-    dokku('config:set', 'browser-probe', 'E2E_MARKER=' + replacement); wait_api(replacement)
-    run_case('rollout', 'TC-03 Browser renders the rolled out configuration identity.yaml', 'dokku-config-rollout',
-        {'expectedBackendMarker': replacement, 'previousBackendMarker': original})
-    dokku('config:set', 'browser-probe', 'E2E_MARKER=' + original); wait_api(original)
-    dokku('proxy:route:remove', 'browser-probe', '/api/v0'); wait_api(original, absent=True)
-    run_case('route-removed', 'TC-02 Browser reports the removed backend route.yaml', 'dokku-route-removed',
-        {'expectedBackendMarker': original})
-    dokku('proxy:route:set', 'browser-probe', 'api', '/api/v0', '--port', '5001'); wait_api(original)
-    run_case('recovered', healthy, 'dokku-browser-smoke', {'expectedBackendMarker': original})
-    passed = True
-  finally:
-    failures = []
-    for args in [('config:set', 'browser-probe', 'E2E_MARKER=' + original),
-          ('proxy:route:set', 'browser-probe', 'api', '/api/v0', '--port', '5001')]:
+  def crosscheck(self, number, values):
+    if number == 6:
+      spec = spec_from_file_location('transport', Path(__file__).with_name('transport-probe.py'))
+      module = module_from_spec(spec); spec.loader.exec_module(module)
       try:
-        dokku(*args)
-      except Exception as error:
-        failures.append(type(error).__name__)
+        return module.websocket()['marker'] == values['expectedBackendMarker']
+      except (OSError, RuntimeError):
+        return False
+    status, body = read_http('/api/v0/redirect' if number == 9 else '/api/v0/identity')
+    if number == 4:
+      return status == 404 and body == 'Wrong upstream or path'
+    if number == 8:
+      return status == 502 and all(values[key] in html.unescape(body) for key in ('expectedErrorHeading', 'expectedErrorDetail'))
+    if number == 9:
+      return status == 200 and 'API login page' in body
+    if status != 200:
+      return False
+    data = json.loads(body)
+    return (data['role'] == 'api' and data['marker'] == values['expectedBackendMarker']
+            and (number != 2 or data['hostname'] != values['previousHostname'])
+            and (number != 3 or data['marker'] != values['previousBackendMarker']))
+
+  def stage(self, number, negative):
+    values = {'expectedBackendMarker': self.original}
+    if number == 1:
+      self.route(not negative)
+    elif number == 2:
+      self.route()
+      values['previousHostname'] = self.hostname()
+      if not negative:
+        self.dokku('ps:restart', 'browser-probe')
+    elif number == 3:
+      self.route()
+      values.update(previousBackendMarker=self.original, expectedBackendMarker='dokku-backend-' + str(uuid.uuid4()))
+      if not negative:
+        self.dokku('config:set', 'browser-probe', 'E2E_MARKER=' + values['expectedBackendMarker'])
+    elif number == 4:
+      self.dokku('config:set', 'browser-probe', 'E2E_MARKER=' + self.original)
+      self.route(negative)
+    elif number == 5:
+      self.route(False)
+      if not negative:
+        self.route()
+    elif number == 6:
+      if negative:
+        self.dokku('proxy:route:remove', 'browser-probe', '/ws')
+      else:
+        self.dokku('proxy:route:set', 'browser-probe', 'ws', '/ws', '--port', '5002')
+    elif number == 8:
+      self.route()
+      page = (REPO / 'plugins/nginx-vhosts/templates/500-error.html').read_text()
+      values.update(expectedErrorHeading=html.unescape(re.search(r'<h1>(.*?)</h1>', page)[1]),
+                    expectedErrorDetail=html.unescape(re.search(r'<p>(.*?)</p>', page)[1]))
+      self.dokku('ps:scale', 'browser-probe', 'api=1' if negative else 'api=0')
+    elif number == 9:
+      self.dokku('ps:scale', 'browser-probe', 'api=0' if negative else 'api=1')
+      self.route(strip=True)
+    self.neutral_ready()
+    passed, result = self.browser(number, values, negative)
+    observed = self.crosscheck(number, values)
+    result['postCaseCrosscheck'] = observed
+    agree(passed, observed)
+    if negative and passed:
+      raise RuntimeError('Negative control unexpectedly passed')
+    if not negative and not passed:
+      raise RuntimeError('Browser assertion failed: ' + result['case'])
+
+  def execute(self, numbers, negative=False):
+    revision = os.environ['DOKKU_SOURCE_REVISION']
+    if self.command(['git', 'rev-parse', 'HEAD']) != revision:
+      raise RuntimeError('Checkout differs from requested source revision')
+    if self.command(self.compose + ['exec', '-T', 'dokku', 'cat', '/var/lib/dokku/GIT_REV']) != revision:
+      raise RuntimeError('Installed Dokku revision differs from checkout')
+    if self.dokku('config:get', 'browser-probe', 'E2E_FIXTURE_OWNER') != 'dokku-browser-e2e':
+      raise RuntimeError('Refusing to change an unowned app')
+    self.original = self.dokku('config:get', 'browser-probe', 'E2E_MARKER')
+    self.original_routes = self.dokku('proxy:route:report', 'browser-probe')
+    if not self.original.startswith('dokku-backend-') or '/api/v0 -> api:5001' not in self.original_routes or '/ws -> ws:5002' not in self.original_routes:
+      raise RuntimeError('Unexpected fixture marker or original routes')
+    expected = json.loads((ROOT / 'package.json').read_text())['dependencies']['@testrigor/testrigor-cli']
+    version = self.command([self.cli, '--version'])
+    if '/' + expected + ' ' not in version:
+      raise RuntimeError('Installed CLI differs from package.json')
+    image = json.loads(self.command(['docker', 'image', 'inspect', os.environ['DOKKU_E2E_IMAGE'], '--format', '{{json .}}']))
+    provenance = {'sourceRevision': revision, 'harnessRevision': revision, 'suiteID': self.suite,
+      'cliVersion': version, 'runtimeImageID': image['Id'], 'maximumRetries': 2,
+      'retrySource': 'Suite owner confirmation, 2026-11-11; settings key unverified',
+      'hashes': {str(p.relative_to(REPO)): hashlib.sha256(p.read_bytes()).hexdigest()
+                 for p in ROOT.rglob('*') if 'node_modules' not in p.parts and '__pycache__' not in p.parts and p.is_file()}}
+    (self.artifacts / 'provenance.json').write_text(json.dumps(provenance, indent=2))
+    passed = False
+    cleanup = []
     try:
-      wait_api(original)
-      if dokku('proxy:route:report', 'browser-probe') != route:
-        failures.append('Route differs after cleanup')
-    except Exception as error:
-      failures.append(type(error).__name__)
-    (artifacts / 'result.json').write_text(json.dumps({'passed': passed and not failures,
-      'stages': results, 'cleanupFailures': failures}, indent=2), encoding='utf-8')
-    if failures:
-      raise RuntimeError('Fixture cleanup failed')
+      for number in numbers:
+        self.stage(number, negative)
+      passed = True
+    finally:
+      for args in [('ps:scale', 'browser-probe', 'api=1', 'ws=1'),
+                   ('config:set', 'browser-probe', 'E2E_MARKER=' + self.original),
+                   ('proxy:route:set', 'browser-probe', 'api', '/api/v0', '--port', '5001'),
+                   ('proxy:route:set', 'browser-probe', 'ws', '/ws', '--port', '5002')]:
+        try:
+          self.dokku(*args)
+        except Exception as error:
+          cleanup.append(type(error).__name__)
+      try:
+        self.neutral_ready()
+        status, body = read_http('/api/v0/identity')
+        if status != 200 or json.loads(body)['marker'] != self.original or self.dokku('proxy:route:report', 'browser-probe') != self.original_routes:
+          cleanup.append('Original state was not restored')
+      except Exception as error:
+        cleanup.append(type(error).__name__)
+      (self.artifacts / 'result.json').write_text(json.dumps({'passed': passed and not cleanup,
+        'stages': self.results, 'cleanupFailures': cleanup}, indent=2))
+      if cleanup:
+        raise RuntimeError('Fixture cleanup failed')
+
+
+def execute(artifacts, numbers=GATING, negative=False):
+  Controller(artifacts).execute(numbers, negative)
 
 
 if __name__ == '__main__':
+  parser = argparse.ArgumentParser()
+  parser.add_argument('artifacts', type=Path)
+  parser.add_argument('--cases', type=int, nargs='+', choices=(*GATING, 9), default=GATING)
+  parser.add_argument('--negative-controls', action='store_true')
+  args = parser.parse_args()
   sys.stdout.reconfigure(encoding='utf-8', errors='replace')
   try:
-    execute(Path(sys.argv[1]))
+    execute(args.artifacts, args.cases, args.negative_controls)
   except Exception as error:
-    # Avoid printing HTTP/CLI objects or environment values on an error path.
-    print('Browser lifecycle failed: ' + type(error).__name__, file=sys.stderr)
+    # Only controlled messages; never print subprocess/HTTP objects or env values.
+    print('Routing run failed: ' + (str(error) if isinstance(error, RuntimeError) else type(error).__name__), file=sys.stderr)
     sys.exit(1)

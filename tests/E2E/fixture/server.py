@@ -11,7 +11,12 @@ PAGE = b'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Dokku routing probe</title>
 <script src="/probe.js" defer></script></head>
 <body><h1>Dokku routing probe</h1><button id="check">Check backend</button>
-<p id="result" role="status">Backend not checked</p></body></html>'''
+<p id="result" role="status">Backend not checked</p>
+<label for="message">Message</label><input id="message">
+<button id="echo">Send WebSocket message</button><p id="ws-result">WebSocket not checked</p>
+<p id="http-host"></p>
+<a href="/api/v0/identity">Open routed page</a>
+<a href="/api/v0/redirect">Open API login</a></body></html>'''
 SCRIPT = b'''document.querySelector('#check').addEventListener('click', async () => {
   const result = document.querySelector('#result');
   result.textContent = 'Checking backend';
@@ -20,16 +25,42 @@ SCRIPT = b'''document.querySelector('#check').addEventListener('click', async ()
     if (!response.ok) throw new Error('Backend HTTP ' + response.status);
     const data = await response.json();
     if (data.role !== 'api') throw new Error('Wrong upstream');
-    result.textContent = data.marker;
+    result.textContent = data.marker + ' Container: ' + data.hostname;
   } catch (error) {
     result.textContent = 'Backend check failed: ' + error.message;
   }
+});
+document.querySelector('#echo').addEventListener('click', () => {
+  const result = document.querySelector('#ws-result');
+  result.textContent = 'Connecting';
+  const socket = new WebSocket('ws://' + location.host + '/ws');
+  socket.onopen = () => socket.send(document.querySelector('#message').value);
+  socket.onmessage = event => {
+    const data = JSON.parse(event.data);
+    result.textContent = 'Echo: ' + data.echo + ' Marker: ' + data.marker + ' WebSocket Host: ' + data.host;
+    socket.close();
+  };
+  socket.onerror = () => { result.textContent = 'WebSocket failed'; };
+});
+fetch('/probe-host').then(r => r.json()).then(data => {
+  document.querySelector('#http-host').textContent = 'HTTP Host: ' + data.host;
 });'''
 
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if ROLE == 'web' and self.path == '/':
+        if ROLE == 'web' and self.path == '/transport-probe':
+            payload = b'''<html><body><p id="http"></p><p id="ws">Probing</p><script>
+fetch('/probe-host').then(r=>r.json()).then(d=>document.querySelector('#http').textContent='HTTP Host: '+d.host);
+const nonce = crypto.randomUUID();
+const ws = new WebSocket('ws://'+location.host+'/ws');
+ws.onopen=()=>ws.send(nonce);
+ws.onmessage=e=>{const d=JSON.parse(e.data);document.querySelector('#ws').textContent=
+(d.echo===nonce?'WebSocket echo verified':'Echo mismatch')+' WebSocket Host: '+d.host; ws.close();};
+ws.onerror=()=>document.querySelector('#ws').textContent='WebSocket failed';
+</script></body></html>'''
+            content_type, status = 'text/html', 200
+        elif ROLE == 'web' and self.path == '/':
             payload, content_type, status = PAGE, 'text/html; charset=utf-8', 200
         elif ROLE == 'web' and self.path == '/probe.js':
             payload, content_type, status = SCRIPT, 'text/javascript; charset=utf-8', 200

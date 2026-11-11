@@ -1,4 +1,4 @@
-"""Offline checks for CI gating, failure propagation, cleanup and token handling."""
+"""Offline checks for trust boundaries, browser oracle order and cleanup."""
 import contextlib
 import importlib.util
 import io
@@ -11,7 +11,6 @@ import tempfile
 import textwrap
 import unittest
 from unittest.mock import patch
-import urllib.error
 
 
 def load(name):
@@ -22,144 +21,135 @@ def load(name):
 
 
 class GateTests(unittest.TestCase):
-  def test_workflow_uses_the_exact_gate_without_pr_checkout(self):
+  def test_embedded_gate_matches_without_checkout_or_secret(self):
     root = Path(__file__).resolve().parents[3]
     workflow = (root / '.github/workflows/e2e-tests.yml').read_text()
     embedded = workflow.split("python3 - <<'PY'\n", 1)[1].split('\n          PY', 1)[0]
     self.assertEqual(textwrap.dedent(embedded).strip(), Path(__file__).with_name('ci-gate.py').read_text().strip())
-    gate_job = workflow.split('  gate:\n', 1)[1].split('  browser:\n', 1)[0]
-    self.assertNotIn('actions/checkout', gate_job)
+    gate = workflow.split('  gate:\n', 1)[1].split('  browser:\n', 1)[0]
+    self.assertNotIn('actions/checkout', gate)
+    self.assertNotIn('TESTRIGOR_API_KEY', gate)
+    self.assertIn("secrets.TESTRIGOR_CI_TOKEN != ''", gate)
 
-  def test_gate_process_writes_skip_without_credentials(self):
-    with tempfile.TemporaryDirectory() as directory:
-      output = Path(directory) / 'github-output'
-      result = subprocess.run([sys.executable, str(Path(__file__).with_name('ci-gate.py'))],
-        env={'GITHUB_OUTPUT': str(output), 'GITHUB_EVENT_NAME': 'workflow_dispatch',
-             'GITHUB_REF': 'refs/heads/master', 'DOKKU_DEFAULT_BRANCH': 'master'},
-        capture_output=True, text=True, check=True)
-      self.assertEqual(output.read_text(), 'enabled=false\n')
-      self.assertIn('skipped', result.stdout)
-
-  def test_missing_config_and_untrusted_events(self):
-    gate = load('ci-gate')
-    valid = {'GITHUB_EVENT_NAME': 'workflow_dispatch', 'GITHUB_REF': 'refs/heads/master',
-             'DOKKU_DEFAULT_BRANCH': 'master',
-             'TESTRIGOR_SUITE_ID': 'offline-suite', 'TESTRIGOR_TOKEN_PRESENT': 'true'}
-    self.assertTrue(gate.evaluate(valid))
-    for key in ('TESTRIGOR_SUITE_ID', 'TESTRIGOR_TOKEN_PRESENT', 'DOKKU_DEFAULT_BRANCH'):
-      self.assertFalse(gate.evaluate({k: v for k, v in valid.items() if k != key}))
-    for change in ({'GITHUB_EVENT_NAME': 'pull_request'}, {'GITHUB_EVENT_NAME': 'pull_request_target'},
-                   {'GITHUB_REF': 'refs/heads/topic'},
-                   {'TESTRIGOR_TOKEN_PRESENT': 'false'}):
-      self.assertFalse(gate.evaluate(dict(valid, **change)))
-
-  def test_same_repository_pr_runs_and_fork_or_missing_config_skips(self):
-    gate = load('ci-gate')
-    env = {'GITHUB_EVENT_NAME': 'pull_request', 'GITHUB_REPOSITORY': 'owner/dokku',
-           'DOKKU_PR_HEAD_REPOSITORY': 'owner/dokku',
-           'TESTRIGOR_SUITE_ID': 'offline-suite', 'TESTRIGOR_TOKEN_PRESENT': 'true'}
-    self.assertTrue(gate.evaluate(env))
-    self.assertFalse(gate.evaluate(dict(env, DOKKU_PR_HEAD_REPOSITORY='fork/dokku')))
-    for key in ('TESTRIGOR_SUITE_ID', 'TESTRIGOR_TOKEN_PRESENT'):
-      self.assertFalse(gate.evaluate({k: v for k, v in env.items() if k != key}))
-
-
-class RunnerTests(unittest.TestCase):
-  def exercise(self, fault=None):
-    runner = load('run-ci')
-    self.calls = []
-    state = {'marker': 'dokku-backend-original', 'route': True}
-    token = 'offline-secret-never-log'
-    revision = 'a' * 40
-
-    def command(args, **kwargs):
-      self.assertNotIn('TESTRIGOR_API_KEY', kwargs['env'])
-      self.calls.append(args)
-      output = ''
-      if args[:3] == ['git', 'rev-parse', 'HEAD'] or '/var/lib/dokku/GIT_REV' in args:
-        output = revision
-      elif args[:3] == ['docker', 'image', 'inspect']:
-        output = '{"Id":"offline-image"}'
-      elif 'config:get' in args:
-        output = 'dokku-browser-e2e' if args[-1] == 'E2E_FIXTURE_OWNER' else state['marker']
-      elif 'config:set' in args:
-        state['marker'] = args[-1].split('=', 1)[1]
-      elif 'proxy:route:report' in args:
-        output = 'Route /api/v0 -> api:5001' if state['route'] else '(none)'
-      elif 'proxy:route:remove' in args:
-        state['route'] = False
-      elif 'proxy:route:set' in args:
-        state['route'] = True
-      return subprocess.CompletedProcess(args, 0, output, '')
-
-    def http(*args, **kwargs):
-      if state['route']:
-        return io.BytesIO(json.dumps({'role': 'api', 'marker': state['marker']}).encode())
-      raise urllib.error.HTTPError(args[0], 404, 'not found', {}, io.BytesIO(b'Wrong upstream or path'))
-
-    class Process:
-      def __init__(inner, args, **kwargs):
-        self.calls.append(args)
-        self.assertEqual(kwargs['env']['TESTRIGOR_API_KEY'], token)
-        self.assertNotIn(token, ' '.join(args))
-        inner.stdout = iter(['diagnostic ' + token + '\n'])
-        inner.code = 0
-        if args[2] == 'validate-syntax':
-          if fault == 'syntax':
-            inner.code = 1
-          return
-        stage = Path(args[args.index('--junit-report-save-path') + 1]).parent.name
-        if stage == 'rollout' and fault == 'cli':
-          inner.code = 9
-        report = Path(args[args.index('--junit-report-save-path') + 1])
-        failure = '<failure message="offline failure"/>' if stage == 'rollout' and fault == 'junit' else ''
-        report.write_text('<testsuites><testsuite><testcase>' + failure + '</testcase>'
-                          '<properties><property name="taskId" value="offline-run"/></properties>'
-                          '</testsuite></testsuites>', encoding='utf-8')
-
-      def wait(inner):
-        return inner.code
-
-    env = {'TESTRIGOR_API_KEY': token, 'TESTRIGOR_SUITE_ID': 'offline-suite',
-           'DOKKU_SOURCE_REVISION': revision, 'DOKKU_E2E_IMAGE': 'offline-image',
-           'DOKKU_HARNESS_BRANCH': 'master'}
+  def test_skip_is_notice_and_summary_with_reason(self):
     with tempfile.TemporaryDirectory() as folder:
-      out = Path(folder) / 'lifecycle'
-      with patch.dict(os.environ, env, clear=True), patch.object(runner.subprocess, 'run', side_effect=command), \
-           patch.object(runner.subprocess, 'check_output', return_value='@testrigor/testrigor-cli/2.0.9 linux-x64 node-v22.15.0'), \
-           patch.object(runner.subprocess, 'Popen', Process), patch.object(runner.urllib.request, 'urlopen', side_effect=http), \
-           contextlib.redirect_stdout(io.StringIO()) as printed:
-        if fault:
-          with self.assertRaises(RuntimeError):
-            runner.execute(out)
-        else:
-          runner.execute(out)
-      result = json.loads((out / 'result.json').read_text())
-      self.assertEqual(result['passed'], fault is None)
-      self.assertEqual(result['cleanupFailures'], [])
-      self.assertEqual(state, {'marker': 'dokku-backend-original', 'route': True})
-      self.assertNotIn(token, printed.getvalue())
-      for path in out.rglob('*'):
-        if path.is_file():
-          self.assertNotIn(token, path.read_text())
-      cloud = [args for args in self.calls if args[:3] == ['testrigor', 'test-suite', 'run']]
-      self.assertTrue(all('--explicit-mutations' not in args and '--settings-path' not in args for args in cloud))
-      return cloud
+      output, summary = Path(folder) / 'output', Path(folder) / 'summary'
+      result = subprocess.run([sys.executable, str(Path(__file__).with_name('ci-gate.py'))],
+        env={'GITHUB_OUTPUT': str(output), 'GITHUB_STEP_SUMMARY': str(summary)}, capture_output=True, text=True, check=True)
+      self.assertEqual(output.read_text(), 'enabled=false\n')
+      self.assertIn('::notice::Browser E2E skipped: suite ID is not configured', result.stdout)
+      self.assertIn('suite ID is not configured', summary.read_text())
 
-  def test_success_runs_five_stages_and_redacts_token(self):
-    cloud = self.exercise()
-    self.assertEqual(len(cloud), 5)
-    self.assertEqual([Path(args[args.index('--junit-report-save-path') + 1]).parent.name for args in cloud],
-                     ['baseline', 'restart', 'rollout', 'route-removed', 'recovered'])
+  def test_event_matrix(self):
+    gate = load('ci-gate')
+    valid = {'TESTRIGOR_SUITE_ID': 'suite', 'TESTRIGOR_TOKEN_PRESENT': 'true',
+             'DOKKU_DEFAULT_BRANCH': 'master', 'GITHUB_REF': 'refs/heads/master'}
+    self.assertTrue(gate.evaluate(dict(valid, GITHUB_EVENT_NAME='workflow_dispatch')))
+    self.assertTrue(gate.evaluate(dict(valid, GITHUB_EVENT_NAME='schedule')))
+    self.assertFalse(gate.evaluate(dict(valid, GITHUB_EVENT_NAME='schedule', GITHUB_REF='refs/heads/topic')))
+    self.assertFalse(gate.evaluate(dict(valid, GITHUB_EVENT_NAME='pull_request_target')))
+    for token in ('false', '', ' true '):
+      self.assertFalse(gate.evaluate(dict(valid, GITHUB_EVENT_NAME='workflow_dispatch', TESTRIGOR_TOKEN_PRESENT=token)))
+    pr = dict(valid, GITHUB_EVENT_NAME='pull_request', GITHUB_REPOSITORY='owner/dokku', DOKKU_PR_HEAD_REPOSITORY='owner/dokku')
+    self.assertTrue(gate.evaluate(pr))
+    self.assertFalse(gate.evaluate(dict(pr, DOKKU_PR_HEAD_REPOSITORY='fork/dokku')))
 
-  def test_cli_failure_stops_cycle_and_restores_state(self):
-    self.assertEqual(len(self.exercise('cli')), 3)
 
-  def test_junit_failure_stops_even_with_zero_cli_exit(self):
-    self.assertEqual(len(self.exercise('junit')), 3)
+class OracleTests(unittest.TestCase):
+  def test_both_disagreements_fail(self):
+    runner = load('run-ci')
+    for browser, http in ((True, False), (False, True)):
+      with self.assertRaisesRegex(RuntimeError, 'oracle disagreement'):
+        runner.agree(browser, http)
+    runner.agree(True, True)
+    runner.agree(False, False)
 
-  def test_invalid_syntax_starts_no_cloud_run(self):
-    self.assertEqual(self.exercise('syntax'), [])
+  def test_missing_run_id_and_incomplete_results_are_not_verdicts(self):
+    runner = load('run-ci')
+    with tempfile.TemporaryDirectory() as folder:
+      p = Path(folder) / 'report.xml'
+      for body in ('<testcase/>', '<testcase><skipped/></testcase>', '<testcase/><testcase/>'):
+        p.write_text('<testsuites><testsuite>' + body + '</testsuite></testsuites>')
+        with self.assertRaises(RuntimeError): runner.verdict(p, 0)
+
+  def test_browser_failure_is_not_a_successful_negative_cli_error(self):
+    runner = load('run-ci')
+    with tempfile.TemporaryDirectory() as folder:
+      p = Path(folder) / 'report.xml'
+      p.write_text('<testsuites><testcase/><property name="taskId" value="run"/></testsuites>')
+      with self.assertRaisesRegex(RuntimeError, 'without a browser assertion'):
+        runner.verdict(p, 1)
+
+  def test_neutral_readiness_then_browser_then_crosscheck(self):
+    runner = load('run-ci')
+    events = []
+    c = object.__new__(runner.Controller)
+    c.original = 'dokku-backend-original'
+    c.route = lambda *a, **k: events.append('prepare')
+    c.neutral_ready = lambda: events.append('healthz')
+    c.browser = lambda *a: (events.append('browser') or True, {})
+    c.crosscheck = lambda *a: events.append('post-case-http') or True
+    c.stage(1, False)
+    self.assertEqual(events, ['prepare', 'healthz', 'browser', 'post-case-http'])
+
+  def test_negative_control_cannot_pass(self):
+    runner = load('run-ci')
+    c = object.__new__(runner.Controller)
+    c.original = 'dokku-backend-original'
+    c.route = lambda *a, **k: None
+    c.neutral_ready = lambda: None
+    c.browser = lambda *a: (True, {})
+    c.crosscheck = lambda *a: True
+    with self.assertRaisesRegex(RuntimeError, 'Negative control unexpectedly passed'):
+      c.stage(1, True)
+
+
+class BoundaryTests(unittest.TestCase):
+  def test_cli_child_receives_token_and_logs_are_redacted(self):
+    runner = load('run-ci')
+    token = 'offline-never-persist-secret'
+    with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'TESTRIGOR_API_KEY': token, 'TESTRIGOR_SUITE_ID': 'suite'}):
+      c = runner.Controller(Path(folder) / 'out')
+      self.assertNotIn('TESTRIGOR_API_KEY', c.local_env)
+      class Process:
+        def __init__(inner, args, **kwargs):
+          self.assertNotIn(token, ' '.join(args))
+          self.assertEqual(kwargs['env']['TESTRIGOR_API_KEY'], token)
+          inner.stdout = iter([token + '\n'])
+        def wait(inner): return 0
+      log = c.artifacts / 'log'
+      with patch.object(runner.subprocess, 'Popen', Process), contextlib.redirect_stdout(io.StringIO()) as printed:
+        self.assertEqual(c.cli_process(['test-suite', 'run'], log), 0)
+      self.assertNotIn(token, log.read_text() + printed.getvalue())
+      self.assertIn('[REDACTED]', log.read_text())
+
+  def test_failures_attempt_all_restoration_steps(self):
+    runner = load('run-ci')
+    revision, original = 'a' * 40, 'dokku-backend-original'
+    routes = 'Route /api/v0 -> api:5001\nRoute /ws -> ws:5002'
+    calls = []
+    with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ,
+      {'TESTRIGOR_API_KEY': 'offline-token', 'TESTRIGOR_SUITE_ID': 'suite',
+       'DOKKU_SOURCE_REVISION': revision, 'DOKKU_E2E_IMAGE': 'image'}):
+      c = runner.Controller(Path(folder) / 'out')
+      def command(args):
+        if '--version' in args: return '@testrigor/testrigor-cli/2.0.9 linux'
+        if 'inspect' in args: return '{"Id":"image"}'
+        return revision
+      def dokku(*args):
+        calls.append(args)
+        if args[0] == 'config:get': return 'dokku-browser-e2e' if args[-1] == 'E2E_FIXTURE_OWNER' else original
+        if args[0] == 'proxy:route:report': return routes
+        if args[0] == 'config:set': raise RuntimeError('restore failed')
+        return ''
+      with patch.object(c, 'command', command), patch.object(c, 'dokku', dokku), \
+           patch.object(c, 'neutral_ready'), patch.object(c, 'stage', side_effect=RuntimeError('browser failed')), \
+           patch.object(runner, 'read_http', return_value=(200, json.dumps({'marker': original}))):
+        with self.assertRaisesRegex(RuntimeError, 'cleanup failed'): c.execute((1,))
+      self.assertIn(('proxy:route:set', 'browser-probe', 'ws', '/ws', '--port', '5002'), calls)
+      result = json.loads((c.artifacts / 'result.json').read_text())
+      self.assertFalse(result['passed'])
+      self.assertTrue(result['cleanupFailures'])
 
 
 if __name__ == '__main__':

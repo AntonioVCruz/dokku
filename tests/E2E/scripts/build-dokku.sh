@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Use a clean archive so Windows line endings and local edits cannot enter the app build.
+# Build only the selected Git revision, preserving executable bits.
 repo=$(git -C "$(dirname "$0")/../../.." rev-parse --show-toplevel)
 revision=${DOKKU_SOURCE_REVISION:-$(git -C "$repo" rev-parse HEAD)}
 artifacts=${1:?Usage: build-dokku.sh PRIVATE_ARTIFACT_DIRECTORY}
@@ -9,7 +9,6 @@ stamp=$(date -u +%Y%m%dT%H%M%SZ)
 context="$artifacts/evidence/source-$stamp-${revision:0:9}"
 mkdir -p "$context/build/package"
 exec > >(tee "$artifacts/evidence/source-build-$stamp.log") 2>&1
-# Sending the Git tar directly preserves executable bits on Windows-backed mounts.
 git -C "$repo" archive --format=tar --output="$context/source.tar" "$revision"
 go_version=$(git -C "$repo" show "$revision:common.mk" | awk '/^BUILD_IMAGE / {sub(/^golang:/,"",$3); print $3}')
 version="$(git -C "$repo" show "$revision:debian/control" | awk '/^Version:/ {print $2}')build+${revision:0:9}"
