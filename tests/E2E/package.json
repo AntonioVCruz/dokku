@@ -2,6 +2,7 @@
   "name": "dokku-browser-routing-tests",
   "private": true,
   "version": "1.0.0",
-  "engines": {"node": "22.15.0"},
-  "dependencies": {"@testrigor/testrigor-cli": "2.0.9"}
+  "dependencies": {
+    "@testrigor/testrigor-cli": "2.0.9"
+  }
 }

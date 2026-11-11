@@ -14,18 +14,9 @@ go_version=$(git -C "$repo" show "$revision:common.mk" | awk '/^BUILD_IMAGE / {s
 version="$(git -C "$repo" show "$revision:debian/control" | awk '/^Version:/ {print $2}')build+${revision:0:9}"
 builder="dokku-e2e/package:${revision:0:9}"
 image="dokku-e2e/source:${revision:0:9}"
-build=(docker build)
-package_cache=()
-runtime_cache=()
-cache=${DOKKU_E2E_BUILD_CACHE:-none}
-if [[ "$cache" == gha ]]; then
-  build=(docker buildx build --load --network=host --allow network.host)
-  package_cache=(--cache-from 'type=gha,scope=dokku-routing-package' --cache-to 'type=gha,scope=dokku-routing-package,mode=max')
-  runtime_cache=(--cache-from 'type=gha,scope=dokku-routing-runtime' --cache-to 'type=gha,scope=dokku-routing-runtime,mode=max')
-fi
 started=$SECONDS
 
-"${build[@]}" "${package_cache[@]}" --progress plain --target amd64 -f contrib/build-dokku.Dockerfile \
+docker build --progress plain --target amd64 -f contrib/build-dokku.Dockerfile \
   --build-arg GOLANG_VERSION="$go_version" --build-arg PLUGIN_MAKE_TARGET=build \
   --build-arg DOKKU_VERSION="$version" --build-arg DOKKU_GIT_REV="$revision" \
   --build-arg IS_RELEASE=false -t "$builder" - <"$context/source.tar"
@@ -34,9 +25,9 @@ trap 'docker rm "$container" >/dev/null' EXIT
 docker cp "$container:/tmp/dokku_${version}_amd64.deb" "$context/build/package/dokku-amd64.deb"
 cp "$context/source.tar" "$context/runtime.tar"
 tar --append --file="$context/runtime.tar" -C "$context" build/package/dokku-amd64.deb
-"${build[@]}" "${runtime_cache[@]}" --progress plain --label "org.opencontainers.image.revision=$revision" \
+docker build --progress plain --label "org.opencontainers.image.revision=$revision" \
   --build-arg DOKKU_TAG="$version" -t "$image" - <"$context/runtime.tar"
 docker image inspect "$image" --format '{{json .}}' >"$artifacts/evidence/source-image-$stamp.json"
 sha256sum "$context/build/package/dokku-amd64.deb" >"$artifacts/evidence/source-package-$stamp.sha256"
-printf '{"elapsedSeconds":%d,"cache":"%s","revision":"%s"}\n' "$((SECONDS - started))" "$cache" "$revision" >"$artifacts/evidence/build-timing-$stamp.json"
+printf '{"elapsedSeconds":%d,"backend":"docker-default","revision":"%s"}\n' "$((SECONDS - started))" "$revision" >"$artifacts/evidence/build-timing-$stamp.json"
 printf 'SOURCE_REVISION=%s\nSOURCE_IMAGE=%s\nBUILD_CONTEXT=%s\n' "$revision" "$image" "$context"

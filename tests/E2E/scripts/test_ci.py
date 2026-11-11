@@ -103,6 +103,28 @@ class OracleTests(unittest.TestCase):
     with self.assertRaisesRegex(RuntimeError, 'Negative control unexpectedly passed'):
       c.stage(1, True)
 
+  def test_infrastructure_failure_is_not_a_valid_negative_control(self):
+    runner = load('run-ci')
+    c = object.__new__(runner.Controller)
+    c.original = 'dokku-backend-original'
+    c.route = lambda *a, **k: None
+    c.neutral_ready = lambda: None
+    c.browser = lambda *a: (False, {'failureMessages': ['Browser node unavailable']})
+    c.crosscheck = lambda *a: False
+    with self.assertRaisesRegex(RuntimeError, 'intended assertion'):
+      c.stage(1, True)
+
+  def test_malformed_postcase_identity_disagrees_with_browser_success(self):
+    runner = load('run-ci')
+    c = object.__new__(runner.Controller)
+    values = {'expectedBackendMarker': 'marker', 'previousHostname': 'old-host'}
+    for body in ('not-json', '[]', '{"role":"api","marker":"marker"}'):
+      with patch.object(runner, 'read_http', return_value=(200, body)):
+        observed = c.crosscheck(2, values)
+      self.assertFalse(observed)
+      with self.assertRaisesRegex(RuntimeError, 'oracle disagreement'):
+        runner.agree(True, observed)
+
 
 class BoundaryTests(unittest.TestCase):
   def test_cli_child_receives_token_and_logs_are_redacted(self):
@@ -132,8 +154,9 @@ class BoundaryTests(unittest.TestCase):
       {'TESTRIGOR_API_KEY': 'offline-token', 'TESTRIGOR_SUITE_ID': 'suite',
        'DOKKU_SOURCE_REVISION': revision, 'DOKKU_E2E_IMAGE': 'image'}):
       c = runner.Controller(Path(folder) / 'out')
+      expected = json.loads((runner.ROOT / 'package.json').read_text())['dependencies']['@testrigor/testrigor-cli']
       def command(args):
-        if '--version' in args: return '@testrigor/testrigor-cli/2.0.9 linux'
+        if '--version' in args: return '@testrigor/testrigor-cli/' + expected + ' linux'
         if 'inspect' in args: return '{"Id":"image"}'
         return revision
       def dokku(*args):

@@ -108,7 +108,7 @@ class Controller:
     return code
 
   def browser(self, number, variables, negative):
-    folder = self.artifacts / ('negative-' if negative else 'positive-') / f'TC-{number:02d}'
+    folder = self.artifacts / ('negative' if negative else 'positive') / f'TC-{number:02d}'
     folder.mkdir(parents=True)
     values = folder / 'variables.json'
     values.write_text(json.dumps(variables), encoding='utf-8')
@@ -135,7 +135,7 @@ class Controller:
       module = module_from_spec(spec); spec.loader.exec_module(module)
       try:
         return module.websocket()['marker'] == values['expectedBackendMarker']
-      except (OSError, RuntimeError):
+      except RuntimeError:
         return False
     status, body = read_http('/api/v0/redirect' if number == 9 else '/api/v0/identity')
     if number == 4:
@@ -146,9 +146,13 @@ class Controller:
       return status == 200 and 'API login page' in body
     if status != 200:
       return False
-    data = json.loads(body)
-    return (data['role'] == 'api' and data['marker'] == values['expectedBackendMarker']
-            and (number != 2 or data['hostname'] != values['previousHostname'])
+    try:
+      data = json.loads(body)
+    except ValueError:
+      return False
+    return (isinstance(data, dict) and data.get('role') == 'api'
+            and data.get('marker') == values['expectedBackendMarker']
+            and (number != 2 or (bool(data.get('hostname')) and data['hostname'] != values['previousHostname']))
             and (number != 3 or data['marker'] != values['previousBackendMarker']))
 
   def stage(self, number, negative):
@@ -193,6 +197,8 @@ class Controller:
     agree(passed, observed)
     if negative and passed:
       raise RuntimeError('Negative control unexpectedly passed')
+    if negative and not any('check that' in message.lower() for message in result['failureMessages']):
+      raise RuntimeError('Negative control did not reach its intended assertion')
     if not negative and not passed:
       raise RuntimeError('Browser assertion failed: ' + result['case'])
 

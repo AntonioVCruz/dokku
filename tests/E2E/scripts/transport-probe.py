@@ -1,15 +1,10 @@
-"""Probe HTTP Host and WebSocket forwarding through the CLI tunnel; no cloud tests."""
+"""Independent WebSocket HTTP-upgrade check, used after the browser verdict."""
 import base64
 import hashlib
-import http.client
 import json
 import os
-from pathlib import Path
 import socket
 import struct
-import subprocess
-import sys
-import time
 
 
 def websocket(proxy=None):
@@ -48,40 +43,3 @@ def websocket(proxy=None):
   finally:
     stream.close()
     connection.close()
-
-
-def main(out):
-  out.mkdir(parents=True, exist_ok=False)
-  # The tunnel does not require a suite token. Do not inherit one into Node.
-  env = {k: v for k, v in os.environ.items() if k != 'TESTRIGOR_API_KEY'}
-  script = """const path = require('path');
-const root = process.env.TESTRIGOR_MODULE_ROOT || path.join(require('child_process').execFileSync('npm', ['root', '-g'], {encoding:'utf8'}).trim(), '@testrigor/testrigor-cli');
-const Tunnel = require(path.join(root, 'dist/util/tunnel.js')).default;
-(async () => { const t = new Tunnel(); await t.initialize(); await t.start(48197,48197);
-console.log('PROBE_READY'); process.on('SIGTERM', async () => {await t.stop();process.exit(0)}); })().catch(e=>{console.error(e.message);process.exit(1)});
-"""
-  result = {'localWebSocket': websocket()}
-  with (out / 'tunnel.log').open('w') as log:
-    process = subprocess.Popen(['node', '-e', script], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    try:
-      # The workflow step timeout bounds download/startup as well as this loop.
-      for line in process.stdout:
-        log.write(line); log.flush()
-        if 'PROBE_READY' in line: break
-      else: raise RuntimeError('Tunnel did not start')
-      connection = http.client.HTTPConnection('tunnel.testrigor.com', 48197, timeout=20)
-      connection.request('GET', 'http://localhost:19080/probe-host', headers={'Host': 'localhost:19080'})
-      response = connection.getresponse()
-      result['tunnelHTTP'] = {'status': response.status, 'body': response.read().decode()}
-      connection.close()
-      result['tunnelWebSocket'] = websocket(('tunnel.testrigor.com', 48197))
-    finally:
-      process.terminate()
-      try: process.wait(timeout=15)
-      except subprocess.TimeoutExpired: process.kill(); process.wait()
-      (out / 'transport.json').write_text(json.dumps(result, indent=2))
-  print(json.dumps(result, indent=2))
-
-
-if __name__ == '__main__':
-  main(Path(sys.argv[1]))
