@@ -77,6 +77,8 @@ ws.onerror=()=>document.querySelector('#ws').textContent='WebSocket failed';
             return
         elif ROLE == 'api' and self.path == '/login':
             payload, content_type, status = b'<h1>API login page</h1>', 'text/html', 200
+        elif ROLE == 'api' and self.path == '/':
+            payload, content_type, status = b'<h1>API root page</h1>', 'text/html', 200
         elif ROLE == 'api' and self.path in ('/api/v0/identity', '/identity', '/api/v0beta/x'):
             payload = json.dumps({'role': ROLE, 'marker': MARKER, 'hostname': HOSTNAME}).encode()
             content_type, status = 'application/json', 200

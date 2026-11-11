@@ -125,8 +125,38 @@ class OracleTests(unittest.TestCase):
       with self.assertRaisesRegex(RuntimeError, 'oracle disagreement'):
         runner.agree(True, observed)
 
+  def test_redirect_control_keeps_api_running_and_adds_wrong_stripped_route(self):
+    runner = load('run-ci')
+    c = object.__new__(runner.Controller)
+    c.original = 'dokku-backend-original'
+    commands = []
+    c.dokku = lambda *args: commands.append(args)
+    c.route = lambda **kwargs: self.assertEqual(kwargs, {'strip': True})
+    c.neutral_ready = lambda: None
+    c.browser = lambda *args: (False, {'failureMessages': ['check that page contains "API login page"']})
+    c.crosscheck = lambda *args: False
+    c.stage(9, True)
+    self.assertEqual(commands, [('ps:scale', 'browser-probe', 'api=1'),
+      ('proxy:route:set', 'browser-probe', 'api', '/api/v0/redirect', '--port', '5001', '--strip-prefix')])
+    self.assertTrue(c.redirect_control_route)
+
 
 class BoundaryTests(unittest.TestCase):
+  def test_redirect_control_refuses_to_overwrite_an_existing_route(self):
+    runner = load('run-ci')
+    revision = 'a' * 40
+    routes = 'Route /api/v0 -> api:5001\nRoute /ws -> ws:5002\nRoute /api/v0/redirect -> api:5001'
+    with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ,
+      {'TESTRIGOR_API_KEY': 'offline-token', 'TESTRIGOR_SUITE_ID': 'suite', 'DOKKU_SOURCE_REVISION': revision}):
+      c = runner.Controller(Path(folder) / 'out')
+      def dokku(*args):
+        if args[0] == 'config:get': return 'dokku-browser-e2e' if args[-1] == 'E2E_FIXTURE_OWNER' else 'dokku-backend-original'
+        if args[0] == 'proxy:route:report': return routes
+        self.fail('Preexisting route must be refused before fixture mutations')
+      with patch.object(c, 'command', return_value=revision), patch.object(c, 'dokku', dokku):
+        with self.assertRaisesRegex(RuntimeError, 'existing redirect-control route'):
+          c.execute((9,), True)
+
   def test_every_browser_run_supplies_versioned_zero_retry_settings(self):
     runner = load('run-ci')
     with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ,
@@ -175,6 +205,7 @@ class BoundaryTests(unittest.TestCase):
        'DOKKU_SOURCE_REVISION': revision, 'DOKKU_E2E_IMAGE': 'image'}):
       c = runner.Controller(Path(folder) / 'out')
       expected = json.loads((runner.ROOT / 'package.json').read_text())['dependencies']['@testrigor/testrigor-cli']
+      c.redirect_control_route = True
       def command(args):
         if '--version' in args: return '@testrigor/testrigor-cli/' + expected + ' linux'
         if 'inspect' in args: return '{"Id":"image"}'
@@ -188,8 +219,9 @@ class BoundaryTests(unittest.TestCase):
       with patch.object(c, 'command', command), patch.object(c, 'dokku', dokku), \
            patch.object(c, 'neutral_ready'), patch.object(c, 'stage', side_effect=RuntimeError('browser failed')), \
            patch.object(runner, 'read_http', return_value=(200, json.dumps({'marker': original}))):
-        with self.assertRaisesRegex(RuntimeError, 'cleanup failed'): c.execute((1,))
+        with self.assertRaisesRegex(RuntimeError, 'cleanup failed'): c.execute((9,), True)
       self.assertIn(('proxy:route:set', 'browser-probe', 'ws', '/ws', '--port', '5002'), calls)
+      self.assertIn(('proxy:route:remove', 'browser-probe', '/api/v0/redirect'), calls)
       result = json.loads((c.artifacts / 'result.json').read_text())
       self.assertFalse(result['passed'])
       self.assertTrue(result['cleanupFailures'])

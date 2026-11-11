@@ -63,6 +63,7 @@ class Controller:
     self.cli = str(ROOT / 'node_modules/.bin/testrigor')
     self.compose = ['docker', 'compose', '-f', str(ROOT / 'compose.yml')]
     self.results = []
+    self.redirect_control_route = False
 
   def command(self, args):
     return subprocess.check_output(args, cwd=REPO, env=self.local_env,
@@ -189,8 +190,13 @@ class Controller:
                     expectedErrorDetail=html.unescape(re.search(r'<p>(.*?)</p>', page)[1]))
       self.dokku('ps:scale', 'browser-probe', 'api=1' if negative else 'api=0')
     elif number == 9:
-      self.dokku('ps:scale', 'browser-probe', 'api=0' if negative else 'api=1')
+      self.dokku('ps:scale', 'browser-probe', 'api=1')
       self.route(strip=True)
+      if negative:
+        # Strip the entire endpoint instead of the base prefix: API root is 200
+        # with the wrong heading, so the browser must reach its heading assertion.
+        self.redirect_control_route = True
+        self.dokku('proxy:route:set', 'browser-probe', 'api', '/api/v0/redirect', '--port', '5001', '--strip-prefix')
     self.neutral_ready()
     passed, result = self.browser(number, values, negative)
     observed = self.crosscheck(number, values)
@@ -215,6 +221,8 @@ class Controller:
     self.original_routes = self.dokku('proxy:route:report', 'browser-probe')
     if not self.original.startswith('dokku-backend-') or '/api/v0 -> api:5001' not in self.original_routes or '/ws -> ws:5002' not in self.original_routes:
       raise RuntimeError('Unexpected fixture marker or original routes')
+    if negative and 9 in numbers and 'Route /api/v0/redirect ->' in self.original_routes:
+      raise RuntimeError('Refusing to overwrite an existing redirect-control route')
     expected = json.loads((ROOT / 'package.json').read_text())['dependencies']['@testrigor/testrigor-cli']
     version = self.command([self.cli, '--version'])
     if '/' + expected + ' ' not in version:
@@ -237,7 +245,8 @@ class Controller:
       for args in [('ps:scale', 'browser-probe', 'api=1', 'ws=1'),
                    ('config:set', 'browser-probe', 'E2E_MARKER=' + self.original),
                    ('proxy:route:set', 'browser-probe', 'api', '/api/v0', '--port', '5001'),
-                   ('proxy:route:set', 'browser-probe', 'ws', '/ws', '--port', '5002')]:
+                   ('proxy:route:set', 'browser-probe', 'ws', '/ws', '--port', '5002'),
+                   *([('proxy:route:remove', 'browser-probe', '/api/v0/redirect')] if self.redirect_control_route else [])]:
         try:
           self.dokku(*args)
         except Exception as error:
